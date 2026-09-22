@@ -119,6 +119,7 @@ def main() -> None:
         hidden_dim=HPARAMS.model.hidden_dim,
         speaker_prenet_hidden_dim=HPARAMS.model.speaker_prenet_hidden_dim,
         gru_layers=HPARAMS.model.gru_layers,
+        speaker_encoder=HPARAMS.model.speaker_encoder,
         speaker_dir=HPARAMS.model.speaker_dir,
     )
     model = PersonalVAD(config, device=device).to(device)
