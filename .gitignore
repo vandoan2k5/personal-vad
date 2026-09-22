@@ -1,0 +1,21 @@
+# Môi trường và cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Dữ liệu lớn (audio, noise) — không commit
+data/
+personal-vad-4.zip
+
+# Checkpoint và log train — không commit
+checkpoints/
+checkpoints_v2/
+*.log
+
+# Output đánh giá / demo
+docs/evaluation/
+
+# OS / editor
+.DS_Store
+.vscode/
