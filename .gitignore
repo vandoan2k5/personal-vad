@@ -1,0 +1,5 @@
+data/audio_with_id
+checkpoints
+data/noise
+.venv/
+model/pretrained
