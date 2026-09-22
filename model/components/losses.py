@@ -47,8 +47,9 @@ def to_label_distribution(targets: Tensor) -> Tensor:
 class PVADMultitaskLoss(nn.Module):
     """Main PVAD loss plus lightweight auxiliary supervision.
 
-    - ``cosine``: frame speaker embedding is pulled toward +1 on TSS, -1 on
-      NTSS (``target = p_tss - p_ntss``), scored with MSE on speech frames only.
+    - ``cosine``: pull/push frame embeddings with a margin. TSS frames (including
+      overlap, ``target = p_tss - p_ntss``) pull cosine toward +1 with MSE;
+      NTSS-only frames push cosine below ``cosine_margin`` with a hinge loss.
       NS frames carry no speaker identity and are ignored.
     - ``overlap_logits``: BCE for TSS+NTSS overlap frames. With soft labels an
       overlap frame is exactly a fractional row (e.g. ``[0.9, 0.1, 0]``); with
@@ -57,10 +58,11 @@ class PVADMultitaskLoss(nn.Module):
       pre-FiLM acoustic features.
     """
 
-    def __init__(self, tss_ntss_weight: float = 1.0, ns_ntss_weight: float = 0.1, cosine_weight: float = 0.3, overlap_weight: float = 0.5, vad_weight: float = 0.3, overlap_pos_weight: float = 5.0) -> None:
+    def __init__(self, tss_ntss_weight: float = 1.0, ns_ntss_weight: float = 0.1, cosine_weight: float = 0.3, overlap_weight: float = 0.5, vad_weight: float = 0.3, overlap_pos_weight: float = 5.0, cosine_margin: float = 0.2) -> None:
         super().__init__()
         self.pvad = WeightedPairwiseLoss(tss_ntss_weight, ns_ntss_weight)
         self.cosine_weight, self.overlap_weight, self.vad_weight = float(cosine_weight), float(overlap_weight), float(vad_weight)
+        self.cosine_margin = float(cosine_margin)
         self.register_buffer("overlap_pos_weight", torch.tensor(float(overlap_pos_weight)))
         self.last_parts: dict[str, float] = {}
 
@@ -78,15 +80,21 @@ class PVADMultitaskLoss(nn.Module):
             flat_distr = distr.reshape(-1, 3)
         overlap_target = ((flat_distr[:, 0] > 1e-3) & (flat_distr[:, 0] < 1.0 - 1e-3) & (flat_distr[:, 1] > 1e-3)).float()
         speech_target = 1.0 - flat_distr[:, 2]
-        cosine_target = flat_distr[:, 0] - flat_distr[:, 1]
         pos_weight = self.overlap_pos_weight.to(flat_overlap.device)
         loss_overlap = functional.binary_cross_entropy_with_logits(flat_overlap, overlap_target, pos_weight=pos_weight)
         loss_vad = functional.binary_cross_entropy_with_logits(flat_vad, speech_target)
-        speech_mask = speech_target > 0.5
-        if bool(speech_mask.any()):
-            loss_cosine = functional.mse_loss(flat_cosine[speech_mask], cosine_target[speech_mask])
+        tss_mask = flat_distr[:, 0] > 0.5
+        ntss_mask = (flat_distr[:, 1] > 0.5) & (flat_distr[:, 0] <= 0.5)
+        if bool(tss_mask.any()):
+            cosine_target = flat_distr[tss_mask, 0] - flat_distr[tss_mask, 1]
+            loss_pull = functional.mse_loss(flat_cosine[tss_mask], cosine_target)
         else:
-            loss_cosine = flat_cosine.sum() * 0.0
+            loss_pull = flat_cosine.sum() * 0.0
+        if bool(ntss_mask.any()):
+            loss_push = functional.relu(flat_cosine[ntss_mask] - self.cosine_margin).pow(2).mean()
+        else:
+            loss_push = flat_cosine.sum() * 0.0
+        loss_cosine = loss_pull + loss_push
         total = main + self.overlap_weight * loss_overlap + self.vad_weight * loss_vad + self.cosine_weight * loss_cosine
         parts = {"pvad": main.detach(), "overlap": loss_overlap.detach(), "vad": loss_vad.detach(), "cosine": loss_cosine.detach()}
         self.last_parts = {key: value.item() for key, value in parts.items()}
