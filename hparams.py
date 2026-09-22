@@ -52,9 +52,11 @@ class LossConfig:
     tss_ntss_weight: float = 1.0
     ns_ntss_weight: float = 0.1
     # Auxiliary multi-task weights (0 disables the corresponding head loss).
-    cosine_weight: float = 0.3
+    cosine_weight: float = 0.5
     overlap_weight: float = 0.5
     vad_weight: float = 0.3
+    # NTSS frames push cosine below this margin (hinge); TSS frames pull to +1.
+    cosine_margin: float = 0.2
     # Overlap frames are ~15% of L2/L3; upweight positives in BCE.
     overlap_pos_weight: float = 5.0
 
