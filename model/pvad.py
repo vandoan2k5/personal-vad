@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+import torch
+from torch import Tensor, nn
+import torch.nn.functional as functional
+from .components import CausalSpeakerPrenet, CAMPPlusProfileEncoder, LogMelFrontend, SpeakerFiLM, StreamingGRUBackbone
+
+TSS, NTSS, NS = 0, 1, 2
+CLASS_NAMES = ("tss", "ntss", "ns")
+
+
+@dataclass
+class PVADConfig:
+    sample_rate: int = 16_000
+    n_mels: int = 80
+    hidden_dim: int = 192
+    speaker_prenet_hidden_dim: int = 96
+    gru_layers: int = 2
+    speaker_dir: str = "model/pretrained/campplus"
+
+
+class PersonalVAD(nn.Module):
+    """Causal ternary PVAD with CAM++ enrollment and speaker pre-net matching."""
+
+    def __init__(self, config: PVADConfig = PVADConfig(), device: str | torch.device = "cpu") -> None:
+        super().__init__()
+        self.config = config
+        self.frontend = LogMelFrontend(config.sample_rate, config.n_mels)
+        self.speaker_encoder = CAMPPlusProfileEncoder(config.speaker_dir, device)
+        self.backbone = StreamingGRUBackbone(config.n_mels, config.hidden_dim, config.gru_layers)
+        self.speaker_prenet = CausalSpeakerPrenet(config.n_mels, config.speaker_prenet_hidden_dim, self.speaker_encoder.embedding_dim)
+        self.film = SpeakerFiLM(config.hidden_dim, self.speaker_encoder.embedding_dim)
+        self.classifier = nn.Linear(config.hidden_dim, 3)
+
+    @torch.inference_mode()
+    def enroll(self, enrollment: Tensor) -> Tensor:
+        return self.speaker_encoder.encode(enrollment)
+
+    def init_stream(self, batch_size: int, device: torch.device, dtype: torch.dtype = torch.float32) -> dict[str, object]:
+        return {
+            "frontend": self.frontend.init_state(batch_size, device, dtype),
+            "backbone": None,
+            "speaker_prenet": None,
+        }
+
+    def stream_step(self, stream: Tensor, target_embedding: Tensor, state: dict[str, object]) -> tuple[dict[str, Tensor], dict[str, object]]:
+        features, frontend_state = self.frontend(stream, state["frontend"])
+        next_state = dict(state)
+        next_state["frontend"] = frontend_state
+        if features.size(1) == 0:
+            empty = stream.new_empty(stream.size(0), 0)
+            return {"logits": stream.new_empty(stream.size(0), 0, 3), "cosine": empty}, next_state
+        speaker_frames, speaker_state = self.speaker_prenet(features, state["speaker_prenet"])
+        acoustic, backbone_state = self.backbone(features, state["backbone"])
+        scores = functional.cosine_similarity(speaker_frames, target_embedding.unsqueeze(1), dim=-1)
+        logits = self.classifier(self.film(acoustic, scores, target_embedding))
+        next_state["speaker_prenet"] = speaker_state
+        next_state["backbone"] = backbone_state
+        return {"logits": logits, "cosine": scores}, next_state
+
+    def forward(self, stream: Tensor, target_embedding: Tensor, state: Tensor | None = None) -> dict[str, Tensor]:
+        features = self.frontend.forward_offline(stream)
+        speaker_frames, speaker_state = self.speaker_prenet(features, None)
+        acoustic, backbone_state = self.backbone(features, state)
+        scores = functional.cosine_similarity(speaker_frames, target_embedding.unsqueeze(1), dim=-1)
+        return {"logits": self.classifier(self.film(acoustic, scores, target_embedding)), "cosine": scores, "state": backbone_state, "speaker_state": speaker_state}
+
+    def train(self, mode: bool = True) -> "PersonalVAD":
+        super().train(mode)
+        self.speaker_encoder.eval()
+        return self
+
+    def checkpoint(self) -> dict:
+        state_dict = {name: value for name, value in self.state_dict().items() if not name.startswith("speaker_encoder.")}
+        return {"config": asdict(self.config), "state_dict": state_dict}
+
+    @classmethod
+    def from_checkpoint(cls, path: str | Path, device: str | torch.device = "cpu") -> "PersonalVAD":
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+        model = cls(PVADConfig(**checkpoint["config"]), device=device)
+        model.load_state_dict(checkpoint["state_dict"], strict=False)
+        return model
