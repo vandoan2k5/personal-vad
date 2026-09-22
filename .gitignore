@@ -19,3 +19,5 @@ docs/evaluation/
 # OS / editor
 .DS_Store
 .vscode/
+
+model/pretrained
