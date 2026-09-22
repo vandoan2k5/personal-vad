@@ -123,7 +123,7 @@ def main() -> None:
         speaker_dir=HPARAMS.model.speaker_dir,
     )
     model = PersonalVAD(config, device=device).to(device)
-    criterion = PVADMultitaskLoss(HPARAMS.loss.tss_ntss_weight, HPARAMS.loss.ns_ntss_weight, HPARAMS.loss.cosine_weight, HPARAMS.loss.overlap_weight, HPARAMS.loss.vad_weight, HPARAMS.loss.overlap_pos_weight).to(device)
+    criterion = PVADMultitaskLoss(HPARAMS.loss.tss_ntss_weight, HPARAMS.loss.ns_ntss_weight, HPARAMS.loss.cosine_weight, HPARAMS.loss.overlap_weight, HPARAMS.loss.vad_weight, HPARAMS.loss.overlap_pos_weight, HPARAMS.loss.cosine_margin).to(device)
     optimizer = torch.optim.AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=HPARAMS.train.learning_rate, weight_decay=HPARAMS.train.weight_decay)
     global_step = 0
     if args.resume:
