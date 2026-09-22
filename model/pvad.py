@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as functional
-from .components import CausalSpeakerPrenet, CAMPPlusProfileEncoder, LogMelFrontend, SpeakerFiLM, StreamingGRUBackbone
+from .components import CausalSpeakerPrenet, CAMPPlusProfileEncoder, ECAPAProfileEncoder, LogMelFrontend, SpeakerFiLM, StreamingGRUBackbone
 
 TSS, NTSS, NS = 0, 1, 2
 CLASS_NAMES = ("tss", "ntss", "ns")
@@ -18,7 +18,18 @@ class PVADConfig:
     hidden_dim: int = 192
     speaker_prenet_hidden_dim: int = 96
     gru_layers: int = 2
+    # "campplus" -> model/pretrained/campplus, "ecapa" -> model/pretrained/ecapa.
+    speaker_encoder: str = "campplus"
     speaker_dir: str = "model/pretrained/campplus"
+
+
+def build_speaker_encoder(name: str, model_dir: str | Path, device: str | torch.device = "cpu") -> nn.Module:
+    """Select the frozen enrollment encoder by name."""
+    if name == "campplus":
+        return CAMPPlusProfileEncoder(model_dir, device)
+    if name == "ecapa":
+        return ECAPAProfileEncoder(model_dir, device)
+    raise ValueError(f"unknown speaker_encoder={name!r}, expected 'campplus' or 'ecapa'")
 
 
 class PersonalVAD(nn.Module):
@@ -28,7 +39,7 @@ class PersonalVAD(nn.Module):
         super().__init__()
         self.config = config
         self.frontend = LogMelFrontend(config.sample_rate, config.n_mels)
-        self.speaker_encoder = CAMPPlusProfileEncoder(config.speaker_dir, device)
+        self.speaker_encoder = build_speaker_encoder(config.speaker_encoder, config.speaker_dir, device)
         self.backbone = StreamingGRUBackbone(config.n_mels, config.hidden_dim, config.gru_layers)
         self.speaker_prenet = CausalSpeakerPrenet(config.n_mels, config.speaker_prenet_hidden_dim, self.speaker_encoder.embedding_dim)
         self.film = SpeakerFiLM(config.hidden_dim, self.speaker_encoder.embedding_dim)
