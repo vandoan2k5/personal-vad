@@ -169,12 +169,15 @@ class PVADMixtureDataset(Dataset):
         target_offset = ntss_offset = 0
         for start, end in target_intervals:
             length = end - start
-            self._add(mix, None, target_audio[target_offset:target_offset + length], None, start, self.rng.uniform(-10, -5))
+            # SIR doi xung: target va ntss cung uniform(-5, 5) dB -> SIR trong [-10, 10] dB.
+            # (Truoc day target -10..-5 dB con ntss +5..+12 dB, giang target bi chon 15-22 dB
+            # duoi interferer, day model bo qua giong nho va loan TSS/NTSS.)
+            self._add(mix, None, target_audio[target_offset:target_offset + length], None, start, self.rng.uniform(-5, 5))
             target_mask[start:end] = True
             target_offset += length
         for start, end in ntss_intervals:
             length = end - start
-            self._add(mix, None, ntss_audio[ntss_offset:ntss_offset + length], None, start, self.rng.uniform(5, 12))
+            self._add(mix, None, ntss_audio[ntss_offset:ntss_offset + length], None, start, self.rng.uniform(-5, 5))
             ntss_mask[start:end] = True
             ntss_offset += length
         return self._soft_from_masks(target_mask[::160], ntss_mask[::160])
