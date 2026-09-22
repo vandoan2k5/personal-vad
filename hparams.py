@@ -18,8 +18,11 @@ class DataConfig:
     duration_seconds: float = 30.0
     workers: int = 3
     gender_metadata: str = "data/audio_with_id_gender.json"
-    # Frame ratios are (tss, ntss, ns). Easy samples contain all three classes.
-    level_ratios: tuple[tuple[float, float, float], ...] = ((1 / 3, 1 / 3, 1 / 3), (1 / 3, 1 / 3, 1 / 3), (1 / 3, 1 / 3, 1 / 3))
+    # Frame quotas are (tss, ntss, ns). L1 has no overlap so quotas are exact.
+    # L2/L3 overlap: TSS keeps its quota (wins overlap), NS is the remainder, so the
+    # NTSS quota is raised by the expected overlap to keep dominant labels ~= 1/3 each
+    # (measured L2 [0.333, 0.325, 0.341], L3 [0.333, 0.327, 0.340]).
+    level_ratios: tuple[tuple[float, float, float], ...] = ((1 / 3, 1 / 3, 1 / 3), (1 / 3, 1 / 2, 1 / 6), (1 / 3, 4 / 7, 2 / 21))
     # Hierarchical soft labels for TSS+NTSS overlap frames: (tss, ntss, ns).
     # Single-class frames stay one-hot; overlap frames use (soft_dominant, soft_secondary, 0).
     soft_dominant: float = 0.9
@@ -27,11 +30,14 @@ class DataConfig:
     # Default fraction of samples generated at levels 1, 2, and 3.
     level_sampling_ratios: tuple[float, float, float] = (0.20, 0.40, 0.40)
     # Curriculum entries are (first training step, (L1, L2, L3) ratios).
+    # Easy-to-hard: L1 first, then shift to overlap levels. Together with balanced
+    # labels and rising overlap (0 -> 0.25 -> 0.90) this orders difficulty L1 < L2 < L3,
+    # i.e. expected macro-F1 L1 > L2 > L3.
     curriculum: dict[int, tuple[float, float, float]] = field(default_factory=lambda: {
-        0: (0.3, 0.4, 0.3),
-        5_000: (0.3, 0.4, 0.3),
-        10_000: (0.3, 0.4, 0.3),
-        20_000: (0.3, 0.4, 0.3),
+        0: (0.60, 0.30, 0.10),
+        8_000: (0.40, 0.40, 0.20),
+        16_000: (0.25, 0.45, 0.30),
+        26_000: (0.20, 0.40, 0.40),
     })
     steps_per_epoch: int = 2_000
 
