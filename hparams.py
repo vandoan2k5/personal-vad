@@ -42,6 +42,8 @@ class ModelConfig:
     hidden_dim: int = 192
     speaker_prenet_hidden_dim: int = 96
     gru_layers: int = 2
+    # Chon encoder enrollment: "campplus" hay "ecapa" (doi speaker_dir tuong ung).
+    speaker_encoder: str = "campplus"
     speaker_dir: str = "model/pretrained/campplus"
 
 
