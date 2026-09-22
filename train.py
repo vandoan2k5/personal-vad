@@ -55,6 +55,43 @@ def accuracy(logits: Tensor, labels: Tensor) -> float:
     return (logits.argmax(dim=-1) == dominant_labels(labels)).float().mean().item()
 
 
+def classification_scores(logits: Tensor, labels: Tensor) -> dict[str, float]:
+    """Micro accuracy, balanced accuracy (mean recall) and macro-F1 on dominant labels."""
+    pred = logits.argmax(dim=-1).reshape(-1)
+    true = dominant_labels(labels).reshape(-1)
+    recalls, f1s, present = [], [], 0
+    for cls in range(3):
+        tp = ((pred == cls) & (true == cls)).sum().float()
+        actual = (true == cls).sum().float()
+        predicted = (pred == cls).sum().float()
+        rec = (tp / actual).item() if actual > 0 else 0.0
+        prec = (tp / predicted).item() if predicted > 0 else 0.0
+        f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0)
+        if actual > 0:
+            recalls.append(rec)
+            present += 1
+    return {
+        "accuracy": (pred == true).float().mean().item(),
+        "balanced_accuracy": sum(recalls) / max(1, present),
+        "macro_f1": sum(f1s) / 3,
+    }
+
+
+def confusion_to_scores(confusion: Tensor) -> dict[str, float]:
+    """Level scores from an accumulated 3x3 confusion matrix (rows = true)."""
+    support = confusion.sum(dim=1).float()
+    predicted = confusion.sum(dim=0).float()
+    correct = confusion.diag().float()
+    recall = correct / support.clamp_min(1)
+    precision = correct / predicted.clamp_min(1)
+    f1 = 2 * precision * recall / (precision + recall).clamp_min(1e-12)
+    return {
+        "accuracy": float(correct.sum() / support.sum().clamp_min(1)),
+        "balanced_accuracy": float(recall.mean()),
+        "macro_f1": float(f1.mean()),
+    }
+
+
 @torch.inference_mode()
 def evaluate(model: PersonalVAD, device: torch.device, criterion: PVADMultitaskLoss, global_step: int) -> dict[int, dict[str, float]]:
     """Evaluate independent, forced samples for every curriculum level."""
@@ -64,7 +101,7 @@ def evaluate(model: PersonalVAD, device: torch.device, criterion: PVADMultitaskL
     for level in (1, 2, 3):
         dataset = make_dataset(HPARAMS.evaluation.batches_per_level * HPARAMS.evaluation.batch_size, level, HPARAMS.train.seed + global_step + level, HPARAMS.evaluation.batch_size)
         loader = DataLoader(dataset, batch_size=HPARAMS.evaluation.batch_size, collate_fn=collate_pvad, num_workers=HPARAMS.data.workers, pin_memory=device.type == "cuda")
-        correct = total = 0
+        confusion = torch.zeros(3, 3)
         loss_total = 0.0
         for batch in loader:
             stream, enrollment, labels = (batch[key].to(device) for key in ("stream", "enrollment", "labels"))
@@ -73,9 +110,10 @@ def evaluate(model: PersonalVAD, device: torch.device, criterion: PVADMultitaskL
             frame_count = min(outputs["logits"].size(1), labels.size(1))
             outputs, labels = crop_outputs(outputs, frame_count), labels[:, :frame_count]
             loss_total += criterion(outputs, labels).item()
-            correct += (outputs["logits"].argmax(dim=-1) == dominant_labels(labels)).sum().item()
-            total += dominant_labels(labels).numel()
-        metrics[level] = {"loss": loss_total / len(loader), "accuracy": correct / total}
+            pred = outputs["logits"].argmax(dim=-1).reshape(-1).cpu()
+            true = dominant_labels(labels).reshape(-1).cpu()
+            confusion += torch.bincount(true * 3 + pred, minlength=9).reshape(3, 3)
+        metrics[level] = {"loss": loss_total / len(loader), **confusion_to_scores(confusion)}
     if was_training:
         model.train()
     return metrics
@@ -152,12 +190,13 @@ def main() -> None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), HPARAMS.train.max_gradient_norm)
         optimizer.step()
         step_accuracy = accuracy(outputs["logits"].detach(), labels)
-        progress.set_postfix(iter=global_step, loss=f"{loss.item():.4f}", accuracy=f"{step_accuracy:.4f}")
+        scores = classification_scores(outputs["logits"].detach(), labels)
+        progress.set_postfix(iter=global_step, loss=f"{loss.item():.4f}", acc=f"{scores['accuracy']:.4f}", bal=f"{scores['balanced_accuracy']:.4f}", f1=f"{scores['macro_f1']:.4f}")
         if global_step % HPARAMS.train.log_every_steps == 0:
-            logger.info("iter=%d loss=%.5f accuracy=%.4f pvad=%.5f overlap=%.5f vad=%.5f cosine=%.5f", global_step, loss.item(), step_accuracy, parts["pvad"].item(), parts["overlap"].item(), parts["vad"].item(), parts["cosine"].item())
+            logger.info("iter=%d loss=%.5f accuracy=%.4f balanced_accuracy=%.4f macro_f1=%.4f pvad=%.5f overlap=%.5f vad=%.5f cosine=%.5f", global_step, loss.item(), scores["accuracy"], scores["balanced_accuracy"], scores["macro_f1"], parts["pvad"].item(), parts["overlap"].item(), parts["vad"].item(), parts["cosine"].item())
         if global_step % HPARAMS.train.eval_every_steps == 0:
             metrics = evaluate(model, device, criterion, global_step)
-            logger.info("eval iter=%d %s", global_step, " ".join(f"L{level}(loss={item['loss']:.5f},acc={item['accuracy']:.4f})" for level, item in metrics.items()))
+            logger.info("eval iter=%d %s", global_step, " ".join(f"L{level}(loss={item['loss']:.5f},acc={item['accuracy']:.4f},bal={item['balanced_accuracy']:.4f},f1={item['macro_f1']:.4f})" for level, item in metrics.items()))
         if global_step % HPARAMS.train.checkpoint_every_steps == 0:
             logger.info("saved checkpoint=%s", save_checkpoint(model, optimizer, global_step, args.output))
     if global_step and global_step % HPARAMS.train.checkpoint_every_steps:
